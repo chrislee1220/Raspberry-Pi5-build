@@ -29,10 +29,10 @@ jobs:
             python3-setuptools rsync swig unzip zlib1g-dev file wget zstd \
             python3-pyelftools python3-pip
 
-      - name: 拉取官方 OpenWrt 源码（正式版分支，非 SNAPSHOT）
+      - name: 拉取官方 OpenWrt 源码（锁定正式发布 tag，避免 SNAPSHOT 标注）
         run: |
           cd /mnt/build
-          git clone -b openwrt-25.12 --depth=1 https://github.com/openwrt/openwrt.git openwrt
+          git clone -b v25.12.5 --depth=1 https://github.com/openwrt/openwrt.git openwrt
 
       - name: 拉取 HomeProxy 源码到 package 目录
         run: |
@@ -50,13 +50,14 @@ jobs:
           cd /mnt/build/openwrt
           test -f package/homeproxy/luci-app-homeproxy/Makefile && echo "homeproxy 包目录结构正常" || echo "警告：未找到 luci-app-homeproxy，请检查 clone 结果"
 
-      - name: 生成设备配置（含中文语言包与 HomeProxy）
+      - name: 生成设备配置（含 LuCI 网页后台、中文语言包与 HomeProxy）
         run: |
           cd /mnt/build/openwrt
           cat > .config << 'EOF'
           CONFIG_TARGET_bcm27xx=y
           CONFIG_TARGET_bcm27xx_bcm2712=y
           CONFIG_TARGET_bcm27xx_bcm2712_DEVICE_rpi-5=y
+          CONFIG_PACKAGE_luci=y
           CONFIG_LUCI_LANG_zh_Hans=y
           CONFIG_PACKAGE_luci-app-homeproxy=y
           CONFIG_PACKAGE_luci-i18n-homeproxy-zh-cn=y
@@ -69,6 +70,8 @@ jobs:
           cd /mnt/build/openwrt
           echo "---- 设备 ----"
           grep "CONFIG_TARGET_bcm27xx_bcm2712_DEVICE_rpi-5" .config || echo "警告：设备未选中"
+          echo "---- LuCI 网页后台 ----"
+          grep "^CONFIG_PACKAGE_luci=y" .config || echo "警告：LuCI 未选中"
           echo "---- HomeProxy ----"
           grep "CONFIG_PACKAGE_luci-app-homeproxy" .config || echo "警告：homeproxy 未选中"
           echo "---- 中文语言 ----"
@@ -91,4 +94,5 @@ jobs:
           name: openwrt-cm5-zhcn-homeproxy
           path: /mnt/build/output/
           retention-days: 14
+
 
