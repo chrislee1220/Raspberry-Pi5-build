@@ -1,0 +1,122 @@
+name: Build OpenWrt for Raspberry Pi CM5
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  OPENWRT_VERSION: "25.12.5"
+  TARGET: "bcm27xx"
+  SUBTARGET: "bcm2712"
+  PROFILE: "rpi-5"
+  HOMEPROXY_REF: "4b2617ab3bc67e802236b74ce16e70e3bde456da"
+  IMAGEBUILDER_SHA256: "7d0d7d37d5b9b6d46012274a44c2456026718d73cbe58b619797cfec3fd4219b"
+  SDK_SHA256: "c6aab717ce7c27d154c6c63b4dd7acaf4d9d9f58358f10ed6d161e93716119d3"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout configuration
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang flex bison g++ gawk gcc-multilib gettext \
+            git libelf-dev libncurses-dev libssl-dev python3-setuptools \
+            rsync swig unzip file wget zlib1g-dev zstd
+
+      - name: Download and verify official SDK and ImageBuilder
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="https://downloads.openwrt.org/releases/${OPENWRT_VERSION}/targets/${TARGET}/${SUBTARGET}"
+          ib="openwrt-imagebuilder-${OPENWRT_VERSION}-${TARGET}-${SUBTARGET}.Linux-x86_64.tar.zst"
+          sdk="openwrt-sdk-${OPENWRT_VERSION}-${TARGET}-${SUBTARGET}_gcc-14.3.0_musl.Linux-x86_64.tar.zst"
+
+          wget -q --show-progress "${base}/${ib}"
+          wget -q --show-progress "${base}/${sdk}"
+          echo "${IMAGEBUILDER_SHA256}  ${ib}" | sha256sum -c -
+          echo "${SDK_SHA256}  ${sdk}" | sha256sum -c -
+
+          mkdir sdk imagebuilder
+          tar --zstd -xf "${sdk}" -C sdk --strip-components=1
+          tar --zstd -xf "${ib}" -C imagebuilder --strip-components=1
+
+      - name: Build HomeProxy packages with the matching official SDK
+        shell: bash
+        working-directory: sdk
+        run: |
+          set -euo pipefail
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          git clone https://github.com/immortalwrt/homeproxy.git package/luci-app-homeproxy
+          git -C package/luci-app-homeproxy checkout "${HOMEPROXY_REF}"
+
+          make defconfig
+          make package/luci-app-homeproxy/compile -j"$(nproc)" V=s || \
+            make package/luci-app-homeproxy/compile -j1 V=s
+
+          mapfile -t packages < <(find bin/packages -type f \
+            \( -name 'luci-app-homeproxy-*.apk' \
+            -o -name 'luci-i18n-homeproxy-zh-cn-*.apk' \))
+          test "${#packages[@]}" -ge 2
+          cp "${packages[@]}" ../imagebuilder/packages/
+          printf '%s\n' "${packages[@]}"
+
+      - name: Build CM5 firmware with the official ImageBuilder
+        shell: bash
+        working-directory: imagebuilder
+        run: |
+          set -euo pipefail
+          chmod 0755 "${GITHUB_WORKSPACE}/files/etc/uci-defaults/99-cm5-defaults"
+          packages="luci-ssl \
+          luci-i18n-base-zh-cn \
+          luci-i18n-firewall-zh-cn \
+          luci-i18n-package-manager-zh-cn \
+          luci-app-homeproxy \
+          luci-i18n-homeproxy-zh-cn \
+          sing-box firewall4 kmod-nft-tproxy ucode-mod-digest \
+          ca-bundle zoneinfo-asia"
+
+          make image \
+            PROFILE="${PROFILE}" \
+            PACKAGES="${packages}" \
+            FILES="${GITHUB_WORKSPACE}/files" \
+            ROOTFS_PARTSIZE=512
+
+      - name: Verify package manifest and create checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="imagebuilder/bin/targets/${TARGET}/${SUBTARGET}"
+          manifest="$(find "${out}" -maxdepth 1 -name '*.manifest' | head -n 1)"
+          test -n "${manifest}"
+          grep -q '^luci-app-homeproxy' "${manifest}"
+          grep -q '^luci-i18n-homeproxy-zh-cn' "${manifest}"
+          grep -q '^luci-i18n-base-zh-cn' "${manifest}"
+          grep -q '^sing-box' "${manifest}"
+          (cd "${out}" && sha256sum *.img.gz > SHA256SUMS)
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-${{ env.OPENWRT_VERSION }}-cm5-homeproxy
+          path: |
+            imagebuilder/bin/targets/${{ env.TARGET }}/${{ env.SUBTARGET }}/*.img.gz
+            imagebuilder/bin/targets/${{ env.TARGET }}/${{ env.SUBTARGET }}/*.manifest
+            imagebuilder/bin/targets/${{ env.TARGET }}/${{ env.SUBTARGET }}/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30
+
+
+
