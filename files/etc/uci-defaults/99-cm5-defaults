@@ -1,0 +1,11 @@
+#!/bin/sh
+
+uci -q set system.@system[0].hostname='OpenWrt-CM5'
+uci -q set system.@system[0].timezone='CST-8'
+uci -q set system.@system[0].zonename='Asia/Shanghai'
+uci -q set luci.main.lang='zh_cn'
+
+uci commit system
+uci commit luci
+
+exit 0
