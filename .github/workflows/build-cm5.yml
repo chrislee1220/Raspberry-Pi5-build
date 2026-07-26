@@ -32,10 +32,10 @@ jobs:
           cd /mnt/build
           git clone --depth=1 --branch v25.12.5 https://github.com/openwrt/openwrt.git openwrt
 
-      - name: Add HomeProxy package
+      - name: Add HomeProxy feed
         run: |
           cd /mnt/build/openwrt
-          git clone --depth=1 https://github.com/immortalwrt/homeproxy.git package/homeproxy
+          echo "src-git homeproxy https://github.com/immortalwrt/homeproxy.git" >> feeds.conf.default
 
       - name: Update feeds
         run: |
@@ -43,10 +43,13 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Check HomeProxy source
+      - name: Check HomeProxy package
         run: |
           cd /mnt/build/openwrt
-          test -f package/homeproxy/luci-app-homeproxy/Makefile
+          echo "---- homeproxy packages found in feeds ----"
+          ./scripts/feeds list -a | grep homeproxy || true
+          echo "---- checking luci-app-homeproxy ----"
+          ./scripts/feeds list -a | grep -E '^luci-app-homeproxy\s'
 
       - name: Generate config
         run: |
@@ -83,11 +86,20 @@ jobs:
       - name: Verify config
         run: |
           cd /mnt/build/openwrt
-          grep -q '^CONFIG_TARGET_bcm27xx_bcm2712_DEVICE_rpi-5=y' .config
-          grep -q '^CONFIG_PACKAGE_luci=y' .config
-          grep -q '^CONFIG_PACKAGE_luci-app-homeproxy=y' .config
-          grep -q '^CONFIG_PACKAGE_sing-box=y' .config
-          grep -q '^CONFIG_PACKAGE_luci-i18n-base-zh-cn=y' .config
+          echo "---- target ----"
+          grep '^CONFIG_TARGET_bcm27xx_bcm2712_DEVICE_rpi-5=y' .config
+
+          echo "---- luci ----"
+          grep '^CONFIG_PACKAGE_luci=y' .config
+          grep '^CONFIG_PACKAGE_luci-ssl=y' .config || true
+
+          echo "---- language ----"
+          grep '^CONFIG_LUCI_LANG_zh_Hans=y' .config || true
+          grep '^CONFIG_PACKAGE_luci-i18n-base-zh-cn=y' .config
+
+          echo "---- homeproxy ----"
+          grep '^CONFIG_PACKAGE_luci-app-homeproxy=y' .config
+          grep '^CONFIG_PACKAGE_sing-box=y' .config
           grep '^CONFIG_PACKAGE_luci-i18n-homeproxy-zh-cn=y' .config || true
 
       - name: Download sources
@@ -101,11 +113,13 @@ jobs:
           make -j$(nproc) V=s
 
       - name: Collect artifacts
+        if: always()
         run: |
           mkdir -p /mnt/build/output
           cp /mnt/build/openwrt/bin/targets/bcm27xx/bcm2712/* /mnt/build/output/ 2>/dev/null || true
 
       - name: Upload firmware
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: openwrt-cm5-25.12.5-zhcn-homeproxy
