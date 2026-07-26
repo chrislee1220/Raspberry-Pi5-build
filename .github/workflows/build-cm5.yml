@@ -1,117 +1,125 @@
-name: Build OpenWrt CM5 ImageBuilder zh-cn HomeProxy
+name: Build OpenWrt CM5 zh-cn HomeProxy
 
 on:
   workflow_dispatch:
 
-env:
-  OPENWRT_VERSION: 25.12.5
-  TARGET: bcm27xx
-  SUBTARGET: bcm2712
-  PROFILE: rpi-5
-
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 60
+    timeout-minutes: 180
 
     steps:
-      - name: Free disk space
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 释放磁盘空间
         uses: easimon/maximize-build-space@master
         with:
           root-reserve-mb: 2048
-          swap-size-mb: 2048
+          swap-size-mb: 4096
           remove-dotnet: 'true'
           remove-android: 'true'
           remove-haskell: 'true'
           remove-codeql: 'true'
-          build-mount-path: /mnt/build
+          build-mount-path: '/mnt/build'
 
-      - name: Install dependencies
-        timeout-minutes: 15
-        env:
-          DEBIAN_FRONTEND: noninteractive
+      - name: 安装编译依赖
+        timeout-minutes: 30
         run: |
-          sudo rm -rf /var/lib/man-db/auto-update
-          sudo apt-get update -qq -o Acquire::Retries=5
-          sudo apt-get install -y --no-install-recommends \
-            build-essential curl fakeroot file git libssl-dev lua5.1 meson \
-            ninja-build rsync tar unzip wget zstd
+          sudo apt update
+          sudo apt install -y build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
+            python3-setuptools rsync swig unzip zlib1g-dev file wget zstd \
+            python3-pyelftools python3-pip
 
-      - name: Build HomeProxy apk package
-        timeout-minutes: 15
+      - name: 拉取官方 OpenWrt 源码
         run: |
           cd /mnt/build
+          git clone -b v25.12.5 --depth=1 https://github.com/openwrt/openwrt.git openwrt
 
-          git clone --depth=1 https://github.com/immortalwrt/homeproxy.git homeproxy
-          git clone --depth=1 --filter=blob:none --sparse https://github.com/openwrt/luci.git luci
-          cd luci
-          git sparse-checkout set modules/luci-base/src
-          make -C modules/luci-base/src po2lmo
-          sudo install -m0755 -s modules/luci-base/src/po2lmo /usr/local/bin/po2lmo
-
-          cd /mnt/build
-          git clone https://github.com/alpinelinux/apk-tools.git apk-tools
-          cd apk-tools
-          git checkout b5a31c0d865342ad80be10d68f1bb3d3ad9b0866
-          meson setup build \
-            -Db_lto=true \
-            -Dcompressed-help=false \
-            -Ddocs=disabled \
-            -Dhelp=enabled \
-            -Dlua_version=5.1 \
-            -Ddefault_library=static \
-            -Durl_backend=wget \
-            -Dzstd=false \
-            -Dpython=disabled \
-            -Dtests=disabled \
-            -Dcrypto_backend=openssl
-          ninja -C build
-          sudo meson install -C build --strip
-
-          cd /mnt/build/homeproxy
-          fakeroot bash .github/build-ipk.sh apk workflow_dispatch
-
-          echo "---- HomeProxy package ----"
-          ls -lh .github/luci-app-homeproxy_*_all.apk
-
-      - name: Download official ImageBuilder
-        timeout-minutes: 15
+      - name: 拉取 HomeProxy 源码到 package 目录
         run: |
-          cd /mnt/build
-          curl -fL --retry 5 --retry-delay 5 \
-            -o imagebuilder.tar.zst \
-            "https://downloads.openwrt.org/releases/${OPENWRT_VERSION}/targets/${TARGET}/${SUBTARGET}/openwrt-imagebuilder-${TARGET}-${SUBTARGET}.Linux-x86_64.tar.zst"
+          cd /mnt/build/openwrt
+          git clone --depth=1 https://github.com/immortalwrt/homeproxy.git package/homeproxy
 
-          tar --zstd -xf imagebuilder.tar.zst
-          mv openwrt-imagebuilder-* imagebuilder
-
-      - name: Build firmware image
-        timeout-minutes: 40
+      - name: 更新 feeds
         run: |
-          cd /mnt/build/imagebuilder
+          cd /mnt/build/openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
 
-          mkdir -p packages
-          cp /mnt/build/homeproxy/.github/luci-app-homeproxy_*_all.apk packages/
+      - name: 检查 HomeProxy 包是否存在
+        run: |
+          cd /mnt/build/openwrt
+          test -f package/homeproxy/Makefile
+          grep -q "PKG_NAME:=luci-app-homeproxy" package/homeproxy/Makefile
+          echo "HomeProxy 包目录结构正常"
 
-          echo "---- Local packages ----"
-          ls -lh packages/
+      - name: 生成设备配置
+        run: |
+          cd /mnt/build/openwrt
+          cat > .config << 'EOF'
+          CONFIG_TARGET_bcm27xx=y
+          CONFIG_TARGET_bcm27xx_bcm2712=y
+          CONFIG_TARGET_bcm27xx_bcm2712_DEVICE_rpi-5=y
 
+          CONFIG_TARGET_ROOTFS_EXT4FS=y
+          CONFIG_TARGET_IMAGES_GZIP=y
+
+          CONFIG_PACKAGE_luci=y
+          CONFIG_PACKAGE_luci-ssl=y
+          CONFIG_LUCI_LANG_zh_Hans=y
+          CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
+          CONFIG_PACKAGE_luci-i18n-firewall-zh-cn=y
+
+          CONFIG_PACKAGE_luci-app-homeproxy=y
+          CONFIG_PACKAGE_sing-box=y
+          CONFIG_PACKAGE_firewall4=y
+          CONFIG_PACKAGE_kmod-nft-tproxy=y
+          CONFIG_PACKAGE_kmod-tun=y
+          CONFIG_PACKAGE_kmod-inet-diag=y
+          CONFIG_PACKAGE_ucode-mod-digest=y
+          CONFIG_PACKAGE_ca-bundle=y
+          EOF
+
+          make defconfig
           make info
 
-          make image \
-            PROFILE="${PROFILE}" \
-            EXTRA_IMAGE_NAME="zhcn-homeproxy" \
-            ROOTFS_PARTSIZE=512 \
-            PACKAGES="luci luci-ssl luci-i18n-base-zh-cn luci-i18n-firewall-zh-cn luci-app-homeproxy sing-box firewall4 kmod-nft-tproxy kmod-tun kmod-inet-diag ucode-mod-digest ca-bundle"
+      - name: 确认关键配置已生效
+        run: |
+          cd /mnt/build/openwrt
+          echo "---- 设备 ----"
+          grep "^CONFIG_TARGET_bcm27xx_bcm2712_DEVICE_rpi-5=y" .config
+          echo "---- LuCI 网页后台 ----"
+          grep "^CONFIG_PACKAGE_luci=y" .config
+          echo "---- HomeProxy ----"
+          grep "^CONFIG_PACKAGE_luci-app-homeproxy=y" .config
+          echo "---- sing-box ----"
+          grep "^CONFIG_PACKAGE_sing-box=y" .config
+          echo "---- 中文语言 ----"
+          grep "^CONFIG_PACKAGE_luci-i18n-base-zh-cn=y" .config
 
-      - name: Collect artifacts
+      - name: 下载源码包
+        timeout-minutes: 60
+        run: |
+          cd /mnt/build/openwrt
+          make download -j8
+
+      - name: 完整编译
+        timeout-minutes: 150
+        run: |
+          cd /mnt/build/openwrt
+          make -j$(nproc) V=s
+
+      - name: 收集产物
         if: always()
         run: |
           mkdir -p /mnt/build/output
-          cp /mnt/build/imagebuilder/bin/targets/${TARGET}/${SUBTARGET}/* /mnt/build/output/ 2>/dev/null || true
-          cp /mnt/build/homeproxy/.github/luci-app-homeproxy_*_all.apk /mnt/build/output/ 2>/dev/null || true
+          cp /mnt/build/openwrt/bin/targets/bcm27xx/bcm2712/*ext4*sysupgrade.img.gz /mnt/build/output/ 2>/dev/null || true
+          cp /mnt/build/openwrt/bin/targets/bcm27xx/bcm2712/sha256sums /mnt/build/output/ 2>/dev/null || true
+          cp /mnt/build/openwrt/bin/targets/bcm27xx/bcm2712/*.manifest /mnt/build/output/ 2>/dev/null || true
 
-      - name: Upload firmware
+      - name: 上传固件到 Artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
