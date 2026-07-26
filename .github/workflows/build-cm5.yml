@@ -1,4 +1,4 @@
-name: Build OpenWrt CM5 (zh-cn + HomeProxy)
+name: Build OpenWrt CM5 zh-cn HomeProxy
 
 on:
   workflow_dispatch:
@@ -6,93 +6,114 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
+    timeout-minutes: 180
+
     steps:
-      - name: 检出仓库
-        uses: actions/checkout@v4
-
-      - name: 释放磁盘空间
-        uses: easimon/maximize-build-space@master
-        with:
-          root-reserve-mb: 2048
-          swap-size-mb: 4096
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-          build-mount-path: '/mnt/build'
-
-      - name: 安装编译依赖
+      - name: Cleanup disk
         run: |
-          sudo apt update
-          sudo apt install -y build-essential clang flex bison g++ gawk \
-            gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
-            python3-setuptools rsync swig unzip zlib1g-dev file wget zstd \
-            python3-pyelftools python3-pip
+          df -h
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /opt/ghc || true
+          sudo rm -rf /opt/hostedtoolcache || true
+          sudo docker system prune -af || true
+          sudo apt-get clean
+          df -h
 
-      - name: 拉取官方 OpenWrt 源码（锁定正式发布 tag，避免 SNAPSHOT 标注）
+      - name: Install dependencies
+        timeout-minutes: 30
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
-          cd /mnt/build
-          git clone -b v25.12.5 --depth=1 https://github.com/openwrt/openwrt.git openwrt
+          sudo apt-get update -o Acquire::Retries=5
+          sudo apt-get install -y \
+            build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+            gettext git libncurses-dev libssl-dev python3-distutils \
+            python3-setuptools python3-pyelftools rsync swig unzip zlib1g-dev \
+            file wget curl zstd subversion time
+          sudo apt-get clean
+          df -h
 
-      - name: 拉取 HomeProxy 源码到 package 目录
+      - name: Clone official OpenWrt
         run: |
-          cd /mnt/build/openwrt
-          git clone --depth=1 https://github.com/immortalwrt/homeproxy package/homeproxy
+          git clone --depth=1 --branch v25.12.5 https://github.com/openwrt/openwrt.git openwrt
 
-      - name: 更新 feeds
+      - name: Add HomeProxy package
         run: |
-          cd /mnt/build/openwrt
+          cd openwrt
+          git clone --depth=1 https://github.com/immortalwrt/homeproxy.git package/homeproxy
+          test -f package/homeproxy/Makefile
+          grep -q "PKG_NAME:=luci-app-homeproxy" package/homeproxy/Makefile
+          grep -q "+sing-box" package/homeproxy/Makefile
+
+      - name: Update feeds
+        run: |
+          cd openwrt
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: 检查软件包是否存在
+      - name: Generate config
         run: |
-          cd /mnt/build/openwrt
-          test -f package/homeproxy/luci-app-homeproxy/Makefile && echo "homeproxy 包目录结构正常" || echo "警告：未找到 luci-app-homeproxy，请检查 clone 结果"
+          cd openwrt
 
-      - name: 生成设备配置（含 LuCI 网页后台、中文语言包与 HomeProxy）
-        run: |
-          cd /mnt/build/openwrt
-          cat > .config << 'EOF'
+          wget -O .config https://downloads.openwrt.org/releases/25.12.5/targets/bcm27xx/bcm2712/config.buildinfo
+
+          cat >> .config << 'EOF'
           CONFIG_TARGET_bcm27xx=y
           CONFIG_TARGET_bcm27xx_bcm2712=y
           CONFIG_TARGET_bcm27xx_bcm2712_DEVICE_rpi-5=y
+
+          CONFIG_TARGET_ROOTFS_EXT4FS=y
+          CONFIG_TARGET_IMAGES_GZIP=y
+          # CONFIG_TARGET_ROOTFS_SQUASHFS is not set
+
           CONFIG_PACKAGE_luci=y
+          CONFIG_PACKAGE_luci-ssl=y
           CONFIG_LUCI_LANG_zh_Hans=y
-          CONFIG_PACKAGE_luci-app-homeproxy=y
-          CONFIG_PACKAGE_luci-i18n-homeproxy-zh-cn=y
           CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
+          CONFIG_PACKAGE_luci-i18n-firewall-zh-cn=y
+
+          CONFIG_PACKAGE_luci-app-homeproxy=y
           EOF
+
           make defconfig
 
-      - name: 确认关键配置已生效
+      - name: Verify config
         run: |
-          cd /mnt/build/openwrt
-          echo "---- 设备 ----"
-          grep "CONFIG_TARGET_bcm27xx_bcm2712_DEVICE_rpi-5" .config || echo "警告：设备未选中"
-          echo "---- LuCI 网页后台 ----"
-          grep "^CONFIG_PACKAGE_luci=y" .config || echo "警告：LuCI 未选中"
-          echo "---- HomeProxy ----"
-          grep "CONFIG_PACKAGE_luci-app-homeproxy" .config || echo "警告：homeproxy 未选中"
-          echo "---- 中文语言 ----"
-          grep "CONFIG_LUCI_LANG_zh_Hans" .config || echo "警告：中文语言包未选中"
+          cd openwrt
+          grep "^CONFIG_TARGET_bcm27xx_bcm2712_DEVICE_rpi-5=y" .config
+          grep "^CONFIG_PACKAGE_luci=y" .config
+          grep "^CONFIG_PACKAGE_luci-app-homeproxy=y" .config
+          grep "^CONFIG_PACKAGE_luci-i18n-base-zh-cn=y" .config
+          grep "CONFIG_PACKAGE_sing-box" .config || true
 
-      - name: 完整编译
+      - name: Download sources
+        timeout-minutes: 60
         run: |
-          cd /mnt/build/openwrt
-          make -j$(nproc) V=s
+          cd openwrt
+          make download -j8
 
-      - name: 收集产物
+      - name: Build firmware
+        timeout-minutes: 150
         run: |
-          mkdir -p /mnt/build/output
-          cp /mnt/build/openwrt/bin/targets/bcm27xx/bcm2712/*sysupgrade* /mnt/build/output/ 2>/dev/null || true
-          cp /mnt/build/openwrt/bin/targets/bcm27xx/bcm2712/sha256sums /mnt/build/output/ 2>/dev/null || true
+          cd openwrt
+          make -j$(nproc) || make -j1 V=sc
 
-      - name: 上传固件到 Artifacts
-        uses: actions/upload-artifact@v4
+      - name: Collect artifacts
+        run: |
+          mkdir -p output
+          cp openwrt/bin/targets/bcm27xx/bcm2712/*ext4*sysupgrade.img.gz output/
+          cp openwrt/bin/targets/bcm27xx/bcm2712/sha256sums output/
+          cp openwrt/bin/targets/bcm27xx/bcm2712/*.manifest output/ 2>/dev/null || true
+          cp openwrt/.config output/openwrt-build-config.txt
+          df -h
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v7
         with:
-          name: openwrt-cm5-zhcn-homeproxy
-          path: /mnt/build/output/
+          name: openwrt-cm5-25.12.5-zhcn-homeproxy
+          path: output/
+          if-no-files-found: error
           retention-days: 14
 
 
