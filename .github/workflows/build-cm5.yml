@@ -9,19 +9,19 @@ jobs:
     timeout-minutes: 180
 
     steps:
-      - name: 释放磁盘空间
-        uses: easimon/maximize-build-space@master
-        with:
-          root-reserve-mb: 8192
-          swap-size-mb: 4096
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-          build-mount-path: '/mnt/build'
-
-      - name: 检查磁盘空间
+      - name: 手动释放磁盘空间
         run: |
+          echo "---- before cleanup ----"
+          df -h
+
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /opt/ghc || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+          sudo docker system prune -af || true
+          sudo apt-get clean
+
+          echo "---- after cleanup ----"
           df -h
 
       - name: 安装编译依赖
@@ -39,30 +39,29 @@ jobs:
 
       - name: 拉取官方 OpenWrt 源码
         run: |
-          cd /mnt/build
           git clone -b v25.12.5 --depth=1 https://github.com/openwrt/openwrt.git openwrt
 
       - name: 拉取 HomeProxy 源码到 package 目录
         run: |
-          cd /mnt/build/openwrt
+          cd openwrt
           git clone --depth=1 https://github.com/immortalwrt/homeproxy.git package/homeproxy
 
       - name: 更新 feeds
         run: |
-          cd /mnt/build/openwrt
+          cd openwrt
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
       - name: 检查 HomeProxy 包是否存在
         run: |
-          cd /mnt/build/openwrt
+          cd openwrt
           test -f package/homeproxy/Makefile
           grep -q "PKG_NAME:=luci-app-homeproxy" package/homeproxy/Makefile
           echo "HomeProxy 包目录结构正常"
 
       - name: 生成设备配置
         run: |
-          cd /mnt/build/openwrt
+          cd openwrt
           cat > .config << 'EOF'
           CONFIG_TARGET_bcm27xx=y
           CONFIG_TARGET_bcm27xx_bcm2712=y
@@ -92,7 +91,7 @@ jobs:
 
       - name: 确认关键配置已生效
         run: |
-          cd /mnt/build/openwrt
+          cd openwrt
           grep "^CONFIG_TARGET_bcm27xx_bcm2712_DEVICE_rpi-5=y" .config
           grep "^CONFIG_PACKAGE_luci=y" .config
           grep "^CONFIG_PACKAGE_luci-app-homeproxy=y" .config
@@ -102,29 +101,30 @@ jobs:
       - name: 下载源码包
         timeout-minutes: 60
         run: |
-          cd /mnt/build/openwrt
+          cd openwrt
           make download -j8
 
       - name: 完整编译
         timeout-minutes: 150
         run: |
-          cd /mnt/build/openwrt
-          make -j$(nproc) V=s
+          cd openwrt
+          make -j$(nproc)
 
       - name: 收集产物
         if: always()
         run: |
-          mkdir -p /mnt/build/output
-          cp /mnt/build/openwrt/bin/targets/bcm27xx/bcm2712/*ext4*sysupgrade.img.gz /mnt/build/output/ 2>/dev/null || true
-          cp /mnt/build/openwrt/bin/targets/bcm27xx/bcm2712/sha256sums /mnt/build/output/ 2>/dev/null || true
-          cp /mnt/build/openwrt/bin/targets/bcm27xx/bcm2712/*.manifest /mnt/build/output/ 2>/dev/null || true
+          mkdir -p output
+          cp openwrt/bin/targets/bcm27xx/bcm2712/*ext4*sysupgrade.img.gz output/ 2>/dev/null || true
+          cp openwrt/bin/targets/bcm27xx/bcm2712/sha256sums output/ 2>/dev/null || true
+          cp openwrt/bin/targets/bcm27xx/bcm2712/*.manifest output/ 2>/dev/null || true
+          df -h
 
       - name: 上传固件到 Artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: openwrt-cm5-25.12.5-zhcn-homeproxy
-          path: /mnt/build/output/
+          path: output/
           retention-days: 14
 
 
